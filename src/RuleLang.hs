@@ -1,11 +1,13 @@
 module RuleLang (
   _function,
+  _isNull,
   _hasAny,
   _hasAll,
   _hasOnly,
   _allow,
   _sizeLte,
   _sizeGte,
+  _sizeIs,
   _sizeBetween,
   _pathBlock,
   _enquote,
@@ -33,7 +35,9 @@ _enquote name = let q = take 1 name
 _enquoteList x = _list $ _enquote <$> x
 _list = intercalate ", "
 
-_hasAny parent elements = parent ++ ".keys().hasAny([" ++ _enquoteList elements ++ "])"
+-- _isNull parent elements = parent ++ "[" ++ _enquoteList elements ++ "] == null"
+_isNull parent elements = parent ++ ".get(" ++ _enquoteList elements ++ ", null) == null"
+_hasAny parent elements = parent ++ ".keys().hasNone([" ++ _enquoteList elements ++ "])"
 _hasAll parent elements = parent ++ ".keys().hasAll([" ++ _enquoteList elements ++ "])"
 _hasOnly parent elements = parent ++ ".keys().hasOnly([" ++ _enquoteList elements ++ "])"
 
@@ -43,6 +47,7 @@ _allow conditions expr = do
 
 _sizeLte item max = item ++ ".size() <= " ++ show max
 _sizeGte item min = item ++ ".size() >= " ++ show min
+_sizeIs item size = item ++ ".size() == " ++ show size
 _sizeBetween item min max = _sizeGte item min ++ " && " ++ _sizeLte item max
 
 _and = _print "&& "

@@ -101,12 +101,16 @@ addr (NodeProp (Just parent) prop) = addr parent ++ "[" ++ _enquote prop ++ "]"
 exsts :: NodeLoc -> String
 exsts (NodeIndex par i) = exsts par ++ " && " ++ addr par ++ " is list && " ++ addr par ++ ".size() > " ++ show i
 exsts (NodeProp Nothing prop) = prop ++ "!=null"
-exsts (NodeProp (Just parent) prop) = exsts parent ++ " && '" ++ prop ++ "' in " ++ addr parent 
+exsts (NodeProp (Just parent) prop) = exsts parent ++ " && '" ++ prop ++ "' in " ++ addr parent
 
+fieldNameOnly :: NodeLoc -> String
+fieldNameOnly (NodeIndex root i) = show i
+fieldNameOnly (NodeProp Nothing prop) = prop
+fieldNameOnly (NodeProp (Just parent) prop) = prop
 
 -- the main recursive function to generate the type function
-typeFunc :: String -> [TypeRef] -> CodePrinter
-typeFunc name refs = 
+typeFunc :: String -> [TypeRef] -> Bool -> CodePrinter
+typeFunc name refs pathType = 
   let refCheckList = refCheck (NodeProp Nothing "data") (NodeProp Nothing "prev") False <$> refs 
   in _function (typeFuncName name) ["data", "prev"] [] (_linesWith _or refCheckList)
   where
@@ -154,7 +158,9 @@ typeFunc name refs =
               [ if length requiredKeys > 0
                 then _hasAll (addr parent) requiredKeys
                 else ""
-              , _sizeBetween (addr parent) mn mx
+              , if mx == mn
+                then _sizeIs (addr parent) mx
+                else _sizeBetween (addr parent) mn mx
               , _hasOnly (addr parent) (fieldName <$> fields)
               ]
 
@@ -175,10 +181,13 @@ typeFunc name refs =
       _print "( "
       _print $ _addr ++ " is list " 
       _and
-      _print $ _sizeLte _addr maxSize
-      _print " "
-      _and
-      _print $ _sizeGte _addr minSize
+      _printIf (maxSize == minSize) $ do
+        _print $ _sizeIs _addr maxSize
+      _printIf (maxSize /= minSize) $ do
+        _print $ _sizeLte _addr maxSize
+        _print " "
+        _and
+        _print $ _sizeGte _addr minSize
       _indent
       _return
       _and
@@ -230,7 +239,11 @@ typeFunc name refs =
 
         func = _print $ funcwp exstsTern
 
-        exstsTern = exsts prev ++ " ? " ++ _prevAddr ++ " : null" 
+        -- exstsTern = exsts prev ++ " ? " ++ _prevAddr ++ " : null" 
+        exstsTern = if pathType
+                    then fieldNameOnly prev
+                    else "prev['" ++ fieldNameOnly prev ++ "']"
+                    -- else  "prev.get('" ++ fieldNameOnly prev ++ "', null)"
         funcwp parent' = typeFuncName t ++ "(" ++ _addr ++ ", " ++ parent' ++ ")"
         _addr = addr curr
         _prevAddr = addr prev
@@ -255,7 +268,7 @@ typeFunc name refs =
 
     fieldCheck :: NodeLoc -> NodeLoc -> Field -> CodePrinter
     fieldCheck parent prevParent (Field r n refs c) = do
-      _printIf c $ do -- c means field is marked as const
+      _printIf c $ do -- c means field is marked as const (readonly ahcthuually)
         constCheck
         _return
         _and
@@ -284,24 +297,31 @@ typeFunc name refs =
                _deindent
                _line $ _print ")"
 
-        notDefined key = "!" ++ _hasAny (addr parent) [key]
+        -- notDefined key = "!" ++ _hasAny (addr parent) [key]
+        notDefined key = _isNull (addr parent) [key]
         rs = _linesWith _or (refCheck curr prev c <$> refs)
         curr = NodeProp (Just parent) n
         prev = NodeProp (Just prevParent) n
         _prevAddr = addr prev
         _addr = addr curr
+        _prevField = fieldNameOnly prev
+        _field = fieldNameOnly curr
         constCheck = do -- const type check
           _print "(" 
-          _print $ _not (exsts prev) ++ " " --addr prevParent ++ "==null " 
-          _or
-          -- _print $ "!" ++ _hasAll (addr prevParent) [n] ++ " "
-          -- _or
-          -- _print $ _prevAddr ++ "==null "
-          -- _or
-          _print $ _addr ++ "==" ++ _prevAddr ++ " "
-          _or
-          _print $ mapDiff _prevAddr _addr ++ ".changedKeys().size() == 0"
+          _print $ "data.get('" ++ _prevField ++ "', null)" ++ "==" ++ "prev.get('" ++ _field ++ "', null)"
           _print ")"
+        -- constCheck = do -- const type check
+        --   _print "(" 
+        --   -- _print $ _not (exsts prev) ++ " " --addr prevParent ++ "==null " 
+        --   -- _or
+        --   -- _print $ "!" ++ _hasAll (addr prevParent) [n] ++ " "
+        --   -- _or
+        --   -- _print $ _prevAddr ++ "==null "
+        --   -- _or
+        --   _print $ _addr ++ "==" ++ _prevAddr -- ++ " "
+        --   -- _or
+        --   -- _print $ mapDiff _prevAddr _addr ++ ".changedKeys().size() == 0"
+        --   _print ")"
       
         mapDiff prev next = prev ++ " is map && " ++ next ++ " is map && " 
           ++ next ++ ".diff(" ++ prev ++ ")"
@@ -310,7 +330,7 @@ typeFunc name refs =
 gen :: TopLevel -> CodePrinter
 gen (TopLevelOpt name val) = _print "" -- this will be generated after wrapping the code
 gen (TopLevelFunc def) = funcBlock def
-gen (TopLevelType name refs) = typeFunc name refs
+gen (TopLevelType name refs) = typeFunc name refs False
 gen (TopLevelPath def) = pathBlock def
   where
     pathBlock (PathDef parts refs bodyItems) = do
@@ -328,7 +348,7 @@ gen (TopLevelPath def) = pathBlock def
       _print "}"
 
     ifNo xs i e = if length xs == 0 then i else e
-    pathTypeCond = typeFuncName pathTypeName ++ "(request.resource.data, resource==null ? null : resource.data)"
+    pathTypeCond = typeFuncName pathTypeName ++ "(request.resource.data, resource==null ? {} : resource.data)"
     pathTypeDir = PathBodyDir (PathDirective ["write"] pathTypeCond) 
     --
     -- do nothing if no refs provided
@@ -362,7 +382,7 @@ gen (TopLevelPath def) = pathBlock def
 
     pathTypeFunc :: [TypeRef] -> CodePrinter
     pathTypeFunc refs = --ifNo refs "" . shiftBy (ind + 2) $ typeFunc pathTypeFuncName refs
-      _printIf (length refs > 0) $ typeFunc pathTypeName refs
+      _printIf (length refs > 0) $ typeFunc pathTypeName refs True
     
     pathTypeName = "__PathType"
 
